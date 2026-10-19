@@ -3,9 +3,11 @@
 #include <list>
 #include <string>
 #include <cstdint>
+
 using namespace std;
 
-// Converts a string into a hash number.
+// Required educational hash function.
+// This is not suitable for real password security.
 uint64_t demoHash(const string& s) {
     uint64_t h = 1469598103934665603ULL;
 
@@ -16,81 +18,232 @@ uint64_t demoHash(const string& s) {
     return h;
 }
 
-
 const string pepper = "ChinchillaPepper";
 
-// Stores the information for each user.
+// Stores one user's information.
 struct User {
     string name;
     string salt;
     uint64_t passwordHash;
 };
 
+// The four collision mitigation strategies.
+enum Strategy {
+    CHAINING,
+    LINEAR_PROBING,
+    QUADRATIC_PROBING,
+    DOUBLE_HASHING
+};
+
 class HashTable {
 private:
-   
-    vector<list<User>> table;  // Each bucket contains a list of users.
+    // Separate chaining uses a linked list for each bucket.
+    vector<list<User>> chains;
+
+    // Open addressing stores one user per slot.
+    struct Slot {
+        User user;
+        bool occupied;
+        bool deleted;
+
+        Slot() {
+            occupied = false;
+            deleted = false;
+        }
+    };
+
+    vector<Slot> slots;
+
     int count;
+    Strategy strategy;
 
-    // Calculates which bucket a username belongs in.
-    int getIndex(string name) {
-        int index = demoHash(name) % table.size();
-
-        cout << "Hashing username: " << name << endl;
-        cout << "Bucket index: " << index << endl;
-
-        return index;
+    int capacity() {
+        return (int)slots.size();
     }
 
-    // Doubles the table size and moves users to new buckets.
-    void rehash() {
-        cout << "\nLoad factor reached 0.75. Resizing table...\n";
+    // Returns the name of the selected strategy.
+    string strategyName() {
+        if (strategy == CHAINING) {
+            return "Separate Chaining";
+        }
+        else if (strategy == LINEAR_PROBING) {
+            return "Linear Probing";
+        }
+        else if (strategy == QUADRATIC_PROBING) {
+            return "Quadratic Probing";
+        }
+        else {
+            return "Double Hashing";
+        }
+    }
 
-        vector<list<User>> oldTable = table;
+    // Calculates the original bucket for a username.
+    int getIndex(const string& name) {
+        return demoHash(name) % capacity();
+    }
 
-        cout << "Old table size: " << table.size() << " buckets\n";
+    // Calculates the next bucket to check for open addressing.
+    int probeIndex(const string& name, int attempt) {
+        int start = getIndex(name);
 
-        table.clear();
-        table.resize(oldTable.size() * 2);
+        if (strategy == LINEAR_PROBING) {
+            return (start + attempt) % capacity();
+        }
 
-        cout << "New table size: " << table.size() << " buckets\n";
-        cout << "Moving users to their new buckets...\n";
+        if (strategy == QUADRATIC_PROBING) {
+            // Triangular-number offsets are a quadratic probing variant.
+            // With a power-of-two capacity, they visit every slot.
+            int offset = attempt * (attempt + 1) / 2;
+            return (start + offset) % capacity();
+        }
 
-        for (int i = 0; i < oldTable.size(); i++) {
-            for (list<User>::iterator it = oldTable[i].begin();
-                 it != oldTable[i].end(); it++) {
+        // Double hashing uses a second hash to calculate the step size.
+        // The step is odd so it can visit every slot in a power-of-two table.
+        uint64_t secondHash = demoHash(name + "secondary");
+        int step = (secondHash % capacity()) | 1;
 
-                int index = getIndex(it->name);
-                table[index].push_back(*it);
+        return (start + attempt * step) % capacity();
+    }
 
-                cout << it->name << " moved to bucket "
-                     << index << endl;
+    // Finds an available slot for an open-addressing strategy.
+    int findInsertSlot(const string& name) {
+        int firstDeleted = -1;
+
+        for (int i = 0; i < capacity(); i++) {
+            int index = probeIndex(name, i);
+
+            if (slots[index].occupied) {
+                continue;
+            }
+
+            if (slots[index].deleted) {
+                if (firstDeleted == -1) {
+                    firstDeleted = index;
+                }
+            }
+            else {
+                if (firstDeleted != -1) {
+                    return firstDeleted;
+                }
+
+                return index;
             }
         }
 
-        cout << "Rehash complete!\n\n";
+        return firstDeleted;
+    }
+
+    // Places an existing user into the table without triggering another resize.
+    void placeUser(const User& user) {
+        if (strategy == CHAINING) {
+            int index = getIndex(user.name);
+            chains[index].push_back(user);
+        }
+        else {
+            int index = findInsertSlot(user.name);
+
+            if (index != -1) {
+                slots[index].user = user;
+                slots[index].occupied = true;
+                slots[index].deleted = false;
+            }
+        }
+
+        count++;
+    }
+
+    // Doubles the capacity and reinserts all existing users.
+    void rehash() {
+        int oldCapacity = capacity();
+
+        vector<list<User>> oldChains = chains;
+        vector<Slot> oldSlots = slots;
+
+        cout << "Rehashing table: "
+             << oldCapacity << " -> " << oldCapacity * 2 << "\n";
+
+        slots.clear();
+        slots.resize(oldCapacity * 2);
+
+        chains.clear();
+        chains.resize(oldCapacity * 2);
+
+        count = 0;
+
+        if (strategy == CHAINING) {
+            for (int i = 0; i < oldCapacity; i++) {
+                for (list<User>::iterator it = oldChains[i].begin();
+                     it != oldChains[i].end(); it++) {
+                    placeUser(*it);
+                }
+            }
+        }
+        else {
+            for (int i = 0; i < oldCapacity; i++) {
+                if (oldSlots[i].occupied) {
+                    placeUser(oldSlots[i].user);
+                }
+            }
+        }
+
+        cout << "Rehash complete. Users preserved: "
+             << count << "\n";
     }
 
 public:
-    // Starts with four empty buckets.
-    HashTable() {
-        table.resize(4);
+    // Starts with eight buckets.
+    HashTable(Strategy selectedStrategy) {
+        strategy = selectedStrategy;
+        slots.resize(8);
+        chains.resize(8);
         count = 0;
-
-        cout << "Hash table created with 4 buckets.\n";
     }
 
-    // Calculates the number of users divided by bucket count.
+    // Returns the number of users divided by table capacity.
     double loadFactor() {
-        return (double)count / table.size();
+        return (double)count / capacity();
     }
 
-    // Adds a new user to the table.
+    // Finds a user by username.
+    // Returns a pointer to the record or NULL if not found.
+    User* find(string name) {
+        if (strategy == CHAINING) {
+            int index = getIndex(name);
+
+            for (list<User>::iterator it = chains[index].begin();
+                 it != chains[index].end(); it++) {
+                if (it->name == name) {
+                    return &(*it);
+                }
+            }
+        }
+        else {
+            for (int i = 0; i < capacity(); i++) {
+                int index = probeIndex(name, i);
+
+                // Stop when an unused slot proves the username is absent.
+                if (!slots[index].occupied && !slots[index].deleted) {
+                    break;
+                }
+
+                if (slots[index].occupied &&
+                    slots[index].user.name == name) {
+                    return &slots[index].user;
+                }
+            }
+        }
+
+        return NULL;
+    }
+
+    // Inserts a username and its salted password hash.
     void insert(string name, string password, string salt) {
-        cout << "\nAdding chinchilla user: " << name << endl;
+        if (find(name) != NULL) {
+            cout << "Duplicate username: " << name << "\n";
+            return;
+        }
 
-        cout << "Current load factor: " << loadFactor() << endl;
-
+        // Resize before insertion if the load factor has reached 0.75.
         if (loadFactor() >= 0.75) {
             rehash();
         }
@@ -98,148 +251,176 @@ public:
         User user;
         user.name = name;
         user.salt = salt;
-
-        cout << "Adding salt and pepper to the password before hashing.\n";
-
         user.passwordHash = demoHash(salt + password + pepper);
 
-        cout << "Password hash created.\n";
+        int start = getIndex(name);
 
-        int index = getIndex(name);
+        if (strategy == CHAINING) {
+            if (!chains[start].empty()) {
+                cout << "Collision: " << name
+                     << " added to linked list at bucket "
+                     << start << "\n";
+            }
 
-        // A bucket may already contain another user.
-        if (!table[index].empty()) {
-            cout << "Collision detected! Bucket " << index
-                 << " already contains a user.\n";
-            cout << "Using separate chaining to store the user in the list.\n";
+            chains[start].push_back(user);
         }
+        else {
+            int index = findInsertSlot(name);
 
-        table[index].push_back(user);
-        count++;
+            // Resize if no slot is available.
+            if (index == -1) {
+                rehash();
+                index = findInsertSlot(name);
+            }
 
-        cout << name << " added successfully.\n";
-        cout << "Total users: " << count << endl;
-        cout << "New load factor: " << loadFactor() << endl;
-    }
+            if (index != -1) {
+                if (index != start) {
+                    cout << "Collision: " << name
+                         << " placed at bucket " << index
+                         << " instead of bucket " << start << "\n";
+                }
 
-    // Searches for a username and returns its record if found.
-    User* find(string name) {
-        cout << "Searching for user: " << name << endl;
-
-        int index = getIndex(name);
-
-        cout << "Checking the list in bucket " << index << "...\n";
-
-        for (list<User>::iterator it = table[index].begin();
-             it != table[index].end(); it++) {
-
-            cout << "Checking username: " << it->name << endl;
-
-            if (it->name == name) {
-                cout << "User found!\n";
-                return &(*it);
+                slots[index].user = user;
+                slots[index].occupied = true;
+                slots[index].deleted = false;
             }
         }
 
-        cout << "User was not found.\n";
-        return NULL;
+        count++;
+        cout << "Inserted user: " << name << "\n";
     }
 
     // Removes a user from the table.
     void remove(string name) {
-        cout << "\nRemoving user: " << name << endl;
+        if (strategy == CHAINING) {
+            int index = getIndex(name);
 
-        int index = getIndex(name);
+            for (list<User>::iterator it = chains[index].begin();
+                 it != chains[index].end(); it++) {
+                if (it->name == name) {
+                    chains[index].erase(it);
+                    count--;
 
-        for (list<User>::iterator it = table[index].begin();
-             it != table[index].end(); it++) {
+                    cout << "Removed user: " << name << "\n";
+                    return;
+                }
+            }
+        }
+        else {
+            for (int i = 0; i < capacity(); i++) {
+                int index = probeIndex(name, i);
 
-            if (it->name == name) {
-                table[index].erase(it);
-                count--;
+                if (!slots[index].occupied && !slots[index].deleted) {
+                    break;
+                }
 
-                cout << name << " was removed successfully.\n";
-                cout << "Total users: " << count << endl;
-                cout << "New load factor: " << loadFactor() << endl;
-                return;
+                if (slots[index].occupied &&
+                    slots[index].user.name == name) {
+                    // A deleted marker preserves the probing sequence.
+                    slots[index].occupied = false;
+                    slots[index].deleted = true;
+                    count--;
+
+                    cout << "Removed user: " << name << "\n";
+                    return;
+                }
             }
         }
 
-        cout << "User not found. Nothing was removed.\n";
+        cout << "User not found for removal: " << name << "\n";
     }
 
-    // Checks a username and password during login.
+    // Looks up a username and checks the submitted password.
     void login(string name, string password) {
-        cout << "\nLogin attempt for: " << name << endl;
-
-        // Find the account first.
         User* user = find(name);
 
         if (user == NULL) {
-            cout << "Login failed: unknown chinchilla.\n";
+            cout << "Login failed: unknown username.\n";
+            return;
+        }
+
+        uint64_t submittedHash =
+            demoHash(user->salt + password + pepper);
+
+        if (submittedHash == user->passwordHash) {
+            cout << "Login successful: " << name << "\n";
         }
         else {
-            cout << "Username found. Checking password...\n";
-
-            // Hash the submitted password using the user's salt.
-            uint64_t passwordHash =
-                demoHash(user->salt + password + pepper);
-
-            cout << "Submitted password hash calculated.\n";
-            cout << "Comparing submitted hash with stored hash...\n";
-
-            if (passwordHash == user->passwordHash) {
-                cout << "Login successful! Welcome to ChinChilla Club!\n";
-            }
-            else {
-                cout << "Login failed: incorrect password.\n";
-            }
+            cout << "Login failed: incorrect password.\n";
         }
+    }
+
+    // Displays the final number of users and load factor.
+    void displaySummary() {
+        cout << "Users stored: " << count << "\n";
+        cout << "Final load factor: " << loadFactor() << "\n";
     }
 };
 
-int main() {
- 
-    cout << " Chinchilla Club Login\n";
+// Runs all required tests for one collision strategy.
+void runDemo(Strategy strategy) {
+    HashTable users(strategy);
 
-    
-    HashTable users; 
+    cout << "--------------|";
 
-    // Add five chinchilla accounts.
-    cout << "\n--- Creating Five Users ---\n";
+    if (strategy == CHAINING) {
+        cout << " Separate Chaining ";
+    }
+    else if (strategy == LINEAR_PROBING) {
+        cout << " Linear Probing ";
+    }
+    else if (strategy == QUADRATIC_PROBING) {
+        cout << " Quadratic Probing ";
+    }
+    else {
+        cout << " Double Hashing ";
+    }
 
+    cout << "|--------------\n";
+
+    // Insert at least five user records.
     users.insert("Oso", "treats123", "salt1");
     users.insert("Juna", "dustbath", "salt2");
     users.insert("Goro", "hay456", "salt3");
     users.insert("Mochi", "fluffy789", "salt4");
     users.insert("Coco", "tinyPaws", "salt5");
 
+    cout << "Load factor after initial users: "
+         << users.loadFactor() << "\n";
 
-    cout << "\n--- Test 1: Successful Login ---\n";
+    // Test successful login, incorrect password, and unknown username.
+    cout << "\nLogin tests:\n";
     users.login("Oso", "treats123");
-
-    
-    cout << "\n--- Test 2: Incorrect Password ---\n";
     users.login("Juna", "wrong");
-
-    
-    cout << "\n--- Test 3: Unknown Username ---\n";
     users.login("Snowball", "abc");
 
-   
-    cout << "\n--- Test 4: Remove User ---\n";
+    // Test removal.
+    cout << "\nRemoval test:\n";
     users.remove("Goro");
 
-   
-    cout << "\n--- Test 5: Automatic Rehashing ---\n";
-
+    // Insert more users to trigger automatic resizing.
+    cout << "\nResize test:\n";
     users.insert("Pip", "paws1", "salt6");
     users.insert("Luna", "paws2", "salt7");
     users.insert("Boba", "paws3", "salt8");
 
-    // Show the final table load factor.
-    cout << "\n--- Final Results ---\n";
-    cout << "Final load factor: " << users.loadFactor() << endl;
+    // Confirm the removed user is no longer found.
+    cout << "\nRemoval verification:\n";
+    if (users.find("Goro") == NULL) {
+        cout << "Goro is no longer in the table.\n";
+    }
+
+    users.displaySummary();
+}
+
+int main() {
+    cout << " Chinchilla Club\n";
+
+    // Run the same tests with every collision strategy.
+    runDemo(CHAINING);
+    runDemo(LINEAR_PROBING);
+    runDemo(QUADRATIC_PROBING);
+    runDemo(DOUBLE_HASHING);
 
     return 0;
 }
